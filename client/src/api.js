@@ -22,11 +22,11 @@ export const deleteDocument = (id) => request(`/api/documents/${id}`, { method: 
  * The server sends one JSON object per line; we split on newlines and call
  * `onEvent` for each complete line as soon as it arrives.
  */
-export async function streamChat(messages, onEvent) {
+export async function streamChat(messages, documentIds, onEvent) {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, documentIds }),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

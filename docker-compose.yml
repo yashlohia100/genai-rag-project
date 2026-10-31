@@ -1,0 +1,18 @@
+# Postgres 18 with the pgvector extension preinstalled.
+# Runs on port 5434 so it doesn't clash with the local Postgres installs on 5432/5433.
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: docmind-postgres
+    environment:
+      POSTGRES_USER: docmind
+      POSTGRES_PASSWORD: docmind
+      POSTGRES_DB: docmind
+    ports:
+      - "5434:5432"
+    volumes:
+      # Postgres 18+ images keep data under /var/lib/postgresql (not .../data)
+      - pgdata:/var/lib/postgresql
+
+volumes:
+  pgdata:

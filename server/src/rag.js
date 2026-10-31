@@ -19,9 +19,9 @@ Rules:
 - If the context does not contain the answer, say you couldn't find it in the uploaded documents. Do not make up an answer.
 - Be concise and clear.`;
 
-export async function retrieve(query, { k = TOP_K, minScore = MIN_SCORE } = {}) {
+export async function retrieve(query, { k = TOP_K, minScore = MIN_SCORE, documentIds } = {}) {
   const [queryEmbedding] = await embed([query]);
-  return search(queryEmbedding, { k, minScore });
+  return search(queryEmbedding, { k, minScore, documentIds });
 }
 
 export function buildMessages(history, question, sources) {

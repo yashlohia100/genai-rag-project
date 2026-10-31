@@ -1,5 +1,6 @@
 import express from 'express';
 import multer from 'multer';
+import { initDb } from './db.js';
 import { warmUp } from './embeddings.js';
 import { ingestFile, UnsupportedFileError } from './ingest.js';
 import { streamChat } from './llm.js';
@@ -12,8 +13,11 @@ const app = express();
 app.use(express.json());
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
-app.get('/api/documents', (req, res) => {
-  res.json(vectorStore.listDocuments());
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isValidDocumentIds = (ids) => ids === undefined || (Array.isArray(ids) && ids.every((id) => UUID_RE.test(id)));
+
+app.get('/api/documents', async (req, res) => {
+  res.json(await vectorStore.listDocuments());
 });
 
 app.post('/api/documents', upload.single('file'), async (req, res) => {
@@ -25,27 +29,30 @@ app.post('/api/documents', upload.single('file'), async (req, res) => {
 });
 
 app.delete('/api/documents/:id', async (req, res) => {
-  const deleted = await vectorStore.deleteDocument(req.params.id);
+  const deleted = UUID_RE.test(req.params.id) && (await vectorStore.deleteDocument(req.params.id));
   if (!deleted) return res.status(404).json({ error: 'Document not found.' });
   res.status(204).end();
 });
 
 // Debug endpoint: see exactly which chunks a query retrieves and their scores.
 app.post('/api/search', async (req, res) => {
-  const { query, k = 5 } = req.body ?? {};
+  const { query, k = 5, documentIds } = req.body ?? {};
   if (!query) return res.status(400).json({ error: '"query" is required.' });
-  res.json(await retrieve(query, { k, minScore: 0 }));
+  if (!isValidDocumentIds(documentIds)) return res.status(400).json({ error: '"documentIds" must be an array of document ids.' });
+  res.json(await retrieve(query, { k, minScore: 0, documentIds }));
 });
 
 // Streams newline-delimited JSON events: sources, then tokens, then done (or error).
+// Optional `documentIds` limits retrieval to those documents.
 app.post('/api/chat', async (req, res) => {
-  const { messages } = req.body ?? {};
+  const { messages, documentIds } = req.body ?? {};
   const question = messages?.at(-1);
   if (!Array.isArray(messages) || question?.role !== 'user' || !question.content) {
     return res.status(400).json({ error: '"messages" must be an array ending with a user message.' });
   }
+  if (!isValidDocumentIds(documentIds)) return res.status(400).json({ error: '"documentIds" must be an array of document ids.' });
 
-  const sources = await retrieve(question.content);
+  const sources = await retrieve(question.content, { documentIds });
   const llmMessages = buildMessages(messages.slice(0, -1), question.content, sources);
 
   res.setHeader('Content-Type', 'application/x-ndjson');
@@ -71,7 +78,12 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: err.message });
 });
 
-await vectorStore.load();
+try {
+  await initDb();
+} catch (err) {
+  console.error(err.message);
+  process.exit(1);
+}
 app.listen(PORT, () => console.log(`DocMind server running on http://localhost:${PORT}`));
 
 console.log('Loading embedding model (first run downloads ~23MB)...');

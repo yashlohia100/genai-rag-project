@@ -1,86 +1,73 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import crypto from 'node:crypto';
+import { pool } from './db.js';
 
-// A "vector database" in its simplest form: a list of { text, embedding } records
-// kept in memory, persisted to a JSON file, searched by comparing every vector.
-// Real vector DBs (pgvector, Qdrant, ...) do the same job but use indexes (HNSW)
-// so they don't have to compare against every single record.
+// The same job as the old JSON store (see git history), now done by Postgres + pgvector:
+// vectors live in a `vector(384)` column and similarity is computed inside the database.
 
-const DATA_FILE = path.resolve(import.meta.dirname, '../data/vectors.json');
+// pgvector accepts vectors as text like '[0.12,-0.5,...]', which is exactly JSON array syntax.
+const toVector = (embedding) => JSON.stringify(embedding);
 
-let store = { documents: [], chunks: [] };
-let saving = Promise.resolve();
+const DOCUMENT_COLUMNS = 'id, name, chunk_count AS "chunkCount", created_at AS "createdAt"';
 
-export async function load() {
-  try {
-    store = JSON.parse(await fs.readFile(DATA_FILE, 'utf8'));
-  } catch (err) {
-    if (err.code !== 'ENOENT') throw err;
-  }
-}
-
-// Writes are queued so two uploads finishing together can't corrupt the file.
-function save() {
-  saving = saving.then(async () => {
-    await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
-    const tmp = `${DATA_FILE}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(store));
-    await fs.rename(tmp, DATA_FILE);
-  });
-  return saving;
-}
-
-/**
- * Cosine similarity: how closely two vectors point in the same direction.
- * 1 = same meaning, ~0 = unrelated. (Our vectors are normalized to length 1,
- * so this equals the dot product, but the full formula is shown for learning.)
- */
-export function cosineSimilarity(a, b) {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-export function listDocuments() {
-  return store.documents;
+export async function listDocuments() {
+  const { rows } = await pool.query(`SELECT ${DOCUMENT_COLUMNS} FROM documents ORDER BY created_at`);
+  return rows;
 }
 
 export async function addDocument({ name, chunks }) {
-  const doc = {
-    id: crypto.randomUUID(),
-    name,
-    chunkCount: chunks.length,
-    createdAt: new Date().toISOString(),
-  };
-  store.documents.push(doc);
-  chunks.forEach(({ text, embedding }, index) => {
-    store.chunks.push({ id: crypto.randomUUID(), docId: doc.id, docName: name, index, text, embedding });
-  });
-  await save();
-  return doc;
+  const client = await pool.connect();
+  try {
+    // A transaction: either the document and all its chunks are saved, or nothing is.
+    await client.query('BEGIN');
+    const {
+      rows: [doc],
+    } = await client.query(`INSERT INTO documents (name, chunk_count) VALUES ($1, $2) RETURNING ${DOCUMENT_COLUMNS}`, [
+      name,
+      chunks.length,
+    ]);
+    // unnest() turns parallel arrays into rows, so all chunks go in with one query.
+    await client.query(
+      `INSERT INTO chunks (document_id, chunk_index, content, embedding)
+       SELECT $1, t.idx, t.content, t.embedding::vector
+         FROM unnest($2::int[], $3::text[], $4::text[]) AS t(idx, content, embedding)`,
+      [doc.id, chunks.map((_, i) => i), chunks.map((c) => c.text), chunks.map((c) => toVector(c.embedding))],
+    );
+    await client.query('COMMIT');
+    return doc;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function deleteDocument(id) {
-  const before = store.documents.length;
-  store.documents = store.documents.filter((d) => d.id !== id);
-  if (store.documents.length === before) return false;
-  store.chunks = store.chunks.filter((c) => c.docId !== id);
-  await save();
-  return true;
+  // Chunks are removed automatically by ON DELETE CASCADE.
+  const { rowCount } = await pool.query('DELETE FROM documents WHERE id = $1', [id]);
+  return rowCount > 0;
 }
 
-/** Brute-force nearest-neighbour search: score every chunk, return the top k. */
-export function search(queryEmbedding, { k = 5, minScore = 0 } = {}) {
-  return store.chunks
-    .map(({ embedding, ...chunk }) => ({ ...chunk, score: cosineSimilarity(queryEmbedding, embedding) }))
-    .filter((c) => c.score >= minScore)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
+/**
+ * Nearest-neighbour search.
+ * `<=>` is pgvector's cosine *distance* operator: 0 = identical, so similarity = 1 - distance.
+ * `ORDER BY distance LIMIT k` is the query shape the HNSW index can accelerate.
+ *
+ * `documentIds` is a metadata filter: undefined searches everything, an array restricts
+ * the search to those documents. (At large scale, filtering + HNSW needs care: the index
+ * finds ~40 candidates first and the WHERE clause can discard most of them. pgvector's
+ * `hnsw.iterative_scan` setting addresses that. With small data, Postgres skips the
+ * index and scans exactly.)
+ */
+export async function search(queryEmbedding, { k = 5, minScore = 0, documentIds } = {}) {
+  const { rows } = await pool.query(
+    `SELECT c.document_id AS "docId", d.name AS "docName", c.chunk_index AS index, c.content AS text,
+            1 - (c.embedding <=> $1::vector) AS score
+       FROM chunks c
+       JOIN documents d ON d.id = c.document_id
+      WHERE $3::uuid[] IS NULL OR c.document_id = ANY($3::uuid[])
+      ORDER BY c.embedding <=> $1::vector
+      LIMIT $2`,
+    [toVector(queryEmbedding), k, documentIds ?? null],
+  );
+  return rows.filter((r) => r.score >= minScore);
 }

@@ -71,7 +71,10 @@ body { margin: 0; }
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
 }
-.doc-list li > div { min-width: 0; }
+.section-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 0 0 4px; }
+.doc-toggle { display: flex; align-items: center; gap: 10px; min-width: 0; cursor: pointer; }
+.doc-toggle input { accent-color: var(--accent); flex-shrink: 0; }
+.doc-toggle > div { min-width: 0; }
 .doc-name { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .doc-meta { font-size: 0.75rem; color: var(--muted); }
 

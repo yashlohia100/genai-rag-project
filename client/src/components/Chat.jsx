@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as api from '../api.js';
 
-export default function Chat({ hasDocuments, onError }) {
+export default function Chat({ hasDocuments, documentIds, onError }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -25,7 +25,7 @@ export default function Chat({ hasDocuments, onError }) {
     setBusy(true);
 
     try {
-      await api.streamChat(history, (event) => {
+      await api.streamChat(history, documentIds, (event) => {
         if (event.type === 'sources') updateLast((m) => ({ ...m, sources: event.sources }));
         if (event.type === 'token') updateLast((m) => ({ ...m, content: m.content + event.text }));
         if (event.type === 'error') throw new Error(event.message);
